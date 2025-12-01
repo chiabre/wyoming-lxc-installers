@@ -127,7 +127,5 @@ echo "Service: ${SERVICE_NAME} installed."
 echo "Monitor with: journalctl -u ${SERVICE_NAME} -f"
 echo "Wyoming server exposed at: IP:${SERVICE_PORT}"
 echo
-echo "⚠️ IMPORTANT: You must manually download the Piper ONNX model and config files to:"
-echo "${DATA_DIR}"
-echo
+echo "The service will download the **${VOICE_NAME}** model into **${DATA_DIR}** on the first run."
 echo "⚠️ Re-running the script overwrites the installation."

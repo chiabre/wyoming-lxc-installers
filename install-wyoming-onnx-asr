@@ -1,0 +1,185 @@
+#!/bin/bash
+# Description: Universal interactive installer for Wyoming ONNX ASR Service.
+# Configures execution mode (CPU, CUDA, or TENSORRT) and language based on user input.
+
+# ==============================================================================
+#                 --- CONSTANTS (SHARED RESOURCES) ---
+# ==============================================================================
+
+# WARNING: This configuration uses centralized resources. 
+# Running the script again with a different mode will OVERWRITE the previous setup.
+REPO_URL="https://github.com/tboby/wyoming-onnx-asr.git"
+SERVICE_NAME_BASE="wyoming-onnx-asr"
+EXECUTABLE_NAME="wyoming-nemo-asr" 
+
+# --- CENTRALIZED RESOURCES ---
+INSTALL_DIR="/opt/wyoming-onnx-asr"
+SERVICE_USER="wyoming-asr"
+SERVICE_PORT="10400"
+
+# ==============================================================================
+#                 --- INTERACTIVE CONFIGURATION ---
+# ==============================================================================
+
+set -e
+
+# 1. Ask for Deployment Mode
+echo "--- Step 1: Deployment Mode Selection ---"
+echo "Select the execution mode for the ASR service:"
+echo "  1) CPU (Standard Multi-core)"
+echo "  2) CUDA (Generic NVIDIA GPU)"
+echo "  3) TENSORRT (Optimized NVIDIA GPU, best performance)"
+read -r -p "Enter mode number (1, 2, or 3): " MODE_CHOICE
+
+case "${MODE_CHOICE}" in
+    1) MODE="CPU" ;;
+    2) MODE="CUDA" ;;
+    3) MODE="TENSORRT" ;;
+    *) echo "Invalid choice. Exiting."; exit 1 ;;
+esac
+
+# 2. Display GPU Requirements (if needed)
+if [[ "${MODE}" == "CUDA" || "${MODE}" == "TENSORRT" ]]; then
+    echo -e "\n--- GPU Mode Selected (${MODE}) ---"
+    echo "⚠️ Requirements: NVIDIA GPU, drivers, and CUDA/TensorRT libraries must be installed."
+    read -r -p "Do you confirm these requirements are met? (y/n): " CONFIRMATION
+    if [[ ! "${CONFIRMATION}" =~ ^[Yy]$ ]]; then
+        echo "Exiting. Please resolve GPU requirements and try again."
+        exit 1
+    fi
+fi
+
+# 3. Ask for Language/Model
+echo -e "\n--- Step 2: Language and Model Selection ---"
+echo "Select the language model to install:"
+echo "  1) English-Only (Model: nemo-parakeet-tdt-0.6b-v2)"
+echo "  2) Multilingual (Model: nemo-parakeet-tdt-0.6b-v3, 25 European languages)"
+read -r -p "Enter language number (1 or 2): " LANG_CHOICE
+
+if [[ "${LANG_CHOICE}" == "1" ]]; then
+    ONNX_ASR_LANGUAGE="en"
+    ONNX_ASR_MODEL="nemo-parakeet-tdt-0.6b-v2"
+elif [[ "${LANG_CHOICE}" == "2" ]]; then
+    ONNX_ASR_LANGUAGE="multilingual"
+    ONNX_ASR_MODEL="nemo-parakeet-tdt-0.6b-v3"
+else
+    echo "Invalid choice. Exiting."
+    exit 1
+fi
+
+# ==============================================================================
+#                 --- DYNAMIC CONFIGURATION RESOLUTION ---
+# ==============================================================================
+
+# Assign installation variables based on the selected MODE
+case "${MODE}" in
+    "CPU")
+        ONNX_ASR_PROVIDER="CPUExecutionProvider"
+        PYTHON_PACKAGE="onnxruntime"
+        ;;
+    "CUDA")
+        ONNX_ASR_PROVIDER="CUDAExecutionProvider"
+        PYTHON_PACKAGE="onnxruntime-gpu"
+        ;;
+    "TENSORRT")
+        ONNX_ASR_PROVIDER="TensorRTExecutionProvider"
+        PYTHON_PACKAGE="onnxruntime-gpu"
+        ;;
+esac
+
+# Final service name (e.g., wyoming-onnx-asr-cpu)
+SERVICE_NAME="${SERVICE_NAME_BASE}-${MODE,,}" 
+MODEL_ARGS="--model-${ONNX_ASR_LANGUAGE} ${ONNX_ASR_MODEL}"
+
+echo -e "\n--- Configuration Summary ---"
+echo "Mode: **${MODE}** (${ONNX_ASR_PROVIDER})"
+echo "Model: ${ONNX_ASR_MODEL} (Lang: ${ONNX_ASR_LANGUAGE})"
+echo "Installation Dir: ${INSTALL_DIR}"
+echo "Service User: ${SERVICE_USER}"
+echo "Service Name: ${SERVICE_NAME} on port **${SERVICE_PORT}**"
+echo "---------------------------\n"
+
+
+# ==============================================================================
+#                 --- EXECUTION FLOW (BASED ON YOUR WORKING SCRIPT) ---
+# ==============================================================================
+
+echo "--- Step 3: PRE-REQUISITES & SYSTEM SETUP ---"
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Must run as root."
+  exit 1
+fi
+
+apt update && apt install -y git python3 python3-venv adduser
+
+# --- Step 4: INSTALLATION ---
+echo "--- Step 4: Cloning repository and installing dependencies ---"
+
+# Create service user (before any chown)
+if ! id "$SERVICE_USER" &>/dev/null; then
+  adduser --system --group --disabled-login "$SERVICE_USER"
+fi
+
+# Clone repository (clean)
+rm -rf "$INSTALL_DIR"
+git clone "$REPO_URL" "$INSTALL_DIR"
+
+# Fix ownership
+chown -R "$SERVICE_USER":"$SERVICE_USER" "$INSTALL_DIR"
+
+# Create cache directories
+PIP_CACHE="${INSTALL_DIR}/.pip_cache"
+HF_HOME="${INSTALL_DIR}/.hf_cache"
+mkdir -p "$PIP_CACHE" "$HF_HOME"
+chown -R "$SERVICE_USER":"$SERVICE_USER" "$PIP_CACHE" "$HF_HOME"
+
+# Build virtualenv and install dependencies as service user
+su "$SERVICE_USER" -s /bin/bash -c "
+  cd $INSTALL_DIR
+  python3 -m venv .venv
+  ./.venv/bin/pip install --upgrade pip --cache-dir $PIP_CACHE
+  ./.venv/bin/pip install --no-cache-dir $PYTHON_PACKAGE --cache-dir $PIP_CACHE
+  ./.venv/bin/pip install --no-cache-dir . --cache-dir $PIP_CACHE
+"
+
+# Build correct model flag
+MODEL_ARGS="--model-${ONNX_ASR_LANGUAGE} ${ONNX_ASR_MODEL}"
+
+# --- Step 5: SYSTEMD SERVICE SETUP ---
+echo "--- Step 5: Creating systemd service file (${SERVICE_NAME}.service) ---"
+
+cat <<EOF >/etc/systemd/system/${SERVICE_NAME}.service
+[Unit]
+Description=Wyoming ONNX ASR Service (${MODE})
+After=network.target
+
+[Service]
+User=${SERVICE_USER}
+Group=${SERVICE_USER}
+WorkingDirectory=${INSTALL_DIR}
+Environment="ONNX_ASR_PROVIDER=${ONNX_ASR_PROVIDER}"
+Environment="HF_HOME=${HF_HOME}"
+ExecStart=${INSTALL_DIR}/.venv/bin/${EXECUTABLE_NAME} ${MODEL_ARGS} --uri "tcp://0.0.0.0:${SERVICE_PORT}"
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# --- Step 6: START SERVICE & FINAL INSTRUCTIONS ---
+echo "--- Step 6: Enabling, starting, and final instructions ---"
+
+systemctl daemon-reload
+systemctl enable "$SERVICE_NAME"
+systemctl start "$SERVICE_NAME"
+
+echo -e "\n--- Installation complete ---"
+echo "Service: ${SERVICE_NAME}"
+echo "Monitor with: journalctl -u ${SERVICE_NAME} -f"
+echo "Wyoming server exposed at: IP:${SERVICE_PORT}"
+echo
+echo "⚠️ Re-running the script overwrites the installation."

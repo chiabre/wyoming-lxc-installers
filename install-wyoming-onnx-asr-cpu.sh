@@ -1,5 +1,5 @@
 #!/bin/bash
-# Description: Installs wyoming-onnx-asr as a systemd service using CPU.
+# Description: Installs wyoming-onnx-asr as a systemd service using CPU on Debian 12 LXC.
 # Target OS: Debian 12 (Proxmox LXC)
 
 # --- CONFIGURATION ---
@@ -39,16 +39,16 @@ chown -R "${SERVICE_USER}":"${SERVICE_USER}" "${INSTALL_DIR}"
 echo "--- Step 2: Cloning repository and installing dependencies ---"
 git clone "${REPO_URL}" "${INSTALL_DIR}"
 chown -R "${SERVICE_USER}":"${SERVICE_USER}" "${INSTALL_DIR}" 
-cd "${INSTALL_DIR}"
 
-# Execute VENV and PIP commands using 'su' to run as the service user
-echo "Creating and populating Python Virtual Environment under user ${SERVICE_USER}..."
-# The 'su' command is used here to execute a command as a different user without needing 'sudo'
-su - "${SERVICE_USER}" -c "python3 -m venv ${INSTALL_DIR}/.venv"
-
-echo "Installing Python dependencies..."
-su - "${SERVICE_USER}" -c "${INSTALL_DIR}/.venv/bin/pip install --upgrade pip"
-su - "${SERVICE_USER}" -c "${INSTALL_DIR}/.venv/bin/pip install --no-cache-dir -r ${INSTALL_DIR}/requirements.txt"
+# Execute VENV and PIP commands using 'su' to run as the service user, 
+# ensuring the directory context is correct.
+echo "Creating VENV and installing Python dependencies under user ${SERVICE_USER}..."
+su - "${SERVICE_USER}" -s /bin/bash -c "
+  cd ${INSTALL_DIR} &&
+  python3 -m venv .venv &&
+  ./.venv/bin/pip install --upgrade pip &&
+  ./.venv/bin/pip install --no-cache-dir -r requirements.txt
+"
 
 # --- SYSTEMD SERVICE SETUP ---
 echo "--- Step 3: Creating systemd service file ---"
@@ -78,12 +78,21 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
 
-# --- START SERVICE ---
-echo "--- Step 4: Enabling and starting the service ---"
+# --- START SERVICE & VERIFICATION ---
+echo "--- Step 4: Enabling, starting, and verifying the service ---"
 
 systemctl daemon-reload
 systemctl enable "${SERVICE_NAME}"
 systemctl start "${SERVICE_NAME}"
-echo "✅ Success! Service ${SERVICE_NAME} (CPU) is running and configured for ${ONNX_ASR_MODEL}."
 
-echo "You can check the status with: systemctl status ${SERVICE_NAME}"
+# Add a brief delay to allow the service to try and start (and potentially fail)
+sleep 5 
+
+if systemctl is-active --quiet "${SERVICE_NAME}"; then
+    echo "✅ Success! Service ${SERVICE_NAME} (CPU) is running and active."
+else
+    echo "❌ ERROR! Service ${SERVICE_NAME} failed to start. Review logs for details."
+fi
+
+echo "To check the service status and troubleshoot, use the command below:"
+echo "journalctl -u ${SERVICE_NAME} --since '5 minutes ago' -e"
